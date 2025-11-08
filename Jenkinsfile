@@ -20,13 +20,13 @@ pipeline {
             steps {
                 dir('user-service') {
                     bat 'npm ci --no-fund --no-audit'
-                    // Jest example: force CI mode and disable watch
-                    bat 'npm test -- --ci --watchAll=false || exit /b 0'
+                    bat 'npm test -- --ci --watchAll=false --runInBand --detectOpenHandles --forceExit || exit /b 0'
                 }
                 dir('order-service') {
                     bat 'npm ci --no-fund --no-audit'
-                    bat 'npm test -- --ci --watchAll=false || exit /b 0'
+                    bat 'npm test -- --ci --watchAll=false --runInBand --detectOpenHandles --forceExit || exit /b 0'
                 }
+
             }
         }
 

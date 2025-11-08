@@ -1,152 +1,110 @@
 pipeline {
-  agent { label 'windows' }   // make sure this runs on a Windows agent
+    agent any
 
-  options {
-    timestamps()              // add timestamps to every log line
-    ansiColor('xterm')        // colored output (requires AnsiColor plugin)
-    buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
-    disableConcurrentBuilds()
-  }
-
-  environment {
-    DOCKERHUB_REPO = 'raltoos'
-    IMAGE_TAG = "${BUILD_NUMBER}"
-    // Make npm chattier; optional
-    NPM_CONFIG_LOGLEVEL = 'verbose'
-  }
-
-  stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-        bat '''
-          @echo on
-          ver
-          where git
-          git --version
-          echo Workspace=%CD%
-          git rev-parse --short HEAD
-        '''
-      }
+    environment {
+        DOCKERHUB_REPO = 'raltoos'
+        IMAGE_TAG = "${BUILD_NUMBER}" // Jenkins auto-generates BUILD_NUMBER
     }
 
-    stage('Build & Test Services') {
-      steps {
-        dir('user-service') {
-          bat '''
-            @echo on
-            call npm ci
-            rem run tests; do not fail pipeline on test failures
-            call npm test || exit /b 0
-          '''
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
         }
-        dir('order-service') {
-          bat '''
-            @echo on
-            call npm ci
-            call npm test || exit /b 0
-          '''
+
+        stage('Build & Test Services') {
+            steps {
+                dir('user-service') {
+                    bat 'npm ci'
+                    bat 'npm test || exit 0' // continue even if tests fail
+                }
+                dir('order-service') {
+                    bat 'npm ci'
+                    bat 'npm test || exit 0'
+                }
+            }
         }
-      }
-    }
 
-    stage('Build Docker Images') {
-      steps {
-        bat '''
-          @echo on
-          docker version
-          docker build --progress=plain -t %DOCKERHUB_REPO%/user-service:%IMAGE_TAG% ./user-service
-          docker build --progress=plain -t %DOCKERHUB_REPO%/order-service:%IMAGE_TAG% ./order-service
-          docker images
-        '''
-      }
-    }
-
-    stage('Push to Docker Hub') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-          bat '''
-            @echo on
-            echo Logging in to Docker Hub as %DOCKER_USER%
-            echo %DOCKER_PASS% | docker login -u %DOCKER_USER% --password-stdin
-            docker push %DOCKERHUB_REPO%/user-service:%IMAGE_TAG%
-            docker push %DOCKERHUB_REPO%/order-service:%IMAGE_TAG%
-            docker logout
-          '''
+        stage('Build Docker Images') {
+            steps {
+                bat "docker build -t %DOCKERHUB_REPO%/user-service:%IMAGE_TAG% ./user-service"
+                bat "docker build -t %DOCKERHUB_REPO%/order-service:%IMAGE_TAG% ./order-service"
+            }
         }
-      }
+
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    bat 'echo %DOCKER_PASS% | docker login -u %DOCKER_USER% --password-stdin'
+                    bat "docker push %DOCKERHUB_REPO%/user-service:%IMAGE_TAG%"
+                    bat "docker push %DOCKERHUB_REPO%/order-service:%IMAGE_TAG%"
+                    bat 'docker logout'
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                bat "docker rm -f user-service || exit 0"
+                bat "docker rm -f order-service || exit 0"
+                bat "docker run -d --name user-service -p 3001:3001 %DOCKERHUB_REPO%/user-service:%IMAGE_TAG%"
+                bat "docker run -d --name order-service -p 3002:3002 %DOCKERHUB_REPO%/order-service:%IMAGE_TAG%"
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                bat '''
+                @echo off
+                setlocal enabledelayedexpansion
+                set max=15
+
+                :: Wait for User Service
+                set count=0
+                :check_user
+                docker inspect -f "{{.State.Running}}" user-service | findstr true >nul
+                if %ERRORLEVEL% neq 0 (
+                    set /a count+=1
+                    if !count! lss %max% (
+                        echo Waiting for User Service...
+                        timeout /t 2 >nul
+                        goto check_user
+                    ) else (
+                        echo User Service failed to start
+                        exit /b 1
+                    )
+                )
+
+                :: Wait for Order Service
+                set count=0
+                :check_order
+                docker inspect -f "{{.State.Running}}" order-service | findstr true >nul
+                if %ERRORLEVEL% neq 0 (
+                    set /a count+=1
+                    if !count! lss %max% (
+                        echo Waiting for Order Service...
+                        timeout /t 2 >nul
+                        goto check_order
+                    ) else (
+                        echo Order Service failed to start
+                        exit /b 1
+                    )
+                )
+
+                echo Both services are running!
+                endlocal
+                '''
+            }
+        }
     }
 
-    stage('Deploy') {
-      steps {
-        bat '''
-          @echo on
-          docker ps -a
-          docker rm -f user-service || exit /b 0
-          docker rm -f order-service || exit /b 0
-          docker run -d --name user-service -p 3001:3001 %DOCKERHUB_REPO%/user-service:%IMAGE_TAG%
-          docker run -d --name order-service -p 3002:3002 %DOCKERHUB_REPO%/order-service:%IMAGE_TAG%
-          docker ps
-        '''
-      }
+    post {
+        success {
+            echo "Pipeline succeeded. Images pushed and services deployed."
+        }
+        failure {
+            echo "Pipeline failed."
+        }
     }
-
-    stage('Verify') {
-      steps {
-        bat '''
-          @echo on
-          setlocal enabledelayedexpansion
-          set max=15
-
-          echo Waiting for containers to be running...
-
-          set count=0
-          :check_user
-          docker inspect -f "{{.State.Running}}" user-service | findstr /i true >nul
-          if errorlevel 1 (
-            set /a count+=1
-            if !count! lss %max% (
-              echo Waiting for User Service...
-              timeout /t 2 >nul
-              goto check_user
-            ) else (
-              echo User Service failed to start
-              exit /b 1
-            )
-          )
-
-          set count=0
-          :check_order
-          docker inspect -f "{{.State.Running}}" order-service | findstr /i true >nul
-          if errorlevel 1 (
-            set /a count+=1
-            if !count! lss %max% (
-              echo Waiting for Order Service...
-              timeout /t 2 >nul
-              goto check_order
-            ) else (
-              echo Order Service failed to start
-              exit /b 1
-            )
-          )
-
-          echo Both services are running!
-          endlocal
-        '''
-      }
-    }
-  }
-
-  post {
-    always {
-      // keep key logs/artifacts around if you want them in the build page
-      archiveArtifacts artifacts: '**/npm-debug.log, **/logs/**/*.log', allowEmptyArchive: true
-    }
-    success {
-      echo "Pipeline succeeded. Images pushed and services deployed."
-    }
-    failure {
-      echo "Pipeline failed."
-    }
-  }
 }

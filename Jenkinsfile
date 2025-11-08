@@ -4,6 +4,8 @@ pipeline {
     environment {
         DOCKERHUB_REPO = 'raltoos'
         IMAGE_TAG = "${BUILD_NUMBER}" // Jenkins auto-generates BUILD_NUMBER
+        CI = 'true'                    // <-- make test runners non-interactive
+        NPM_CONFIG_LOGLEVEL = 'verbose'// optional: more visible logs
     }
 
     stages {
@@ -14,14 +16,16 @@ pipeline {
         }
 
         stage('Build & Test Services') {
+            options { timeout(time: 15, unit: 'MINUTES') } // <-- prevent infinite hang
             steps {
                 dir('user-service') {
-                    bat 'npm ci'
-                    bat 'npm test || exit 0' // continue even if tests fail
+                    bat 'npm ci --no-fund --no-audit'
+                    // Jest example: force CI mode and disable watch
+                    bat 'npm test -- --ci --watchAll=false || exit /b 0'
                 }
                 dir('order-service') {
-                    bat 'npm ci'
-                    bat 'npm test || exit 0'
+                    bat 'npm ci --no-fund --no-audit'
+                    bat 'npm test -- --ci --watchAll=false || exit /b 0'
                 }
             }
         }
@@ -46,8 +50,8 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                bat "docker rm -f user-service || exit 0"
-                bat "docker rm -f order-service || exit 0"
+                bat "docker rm -f user-service || exit /b 0"
+                bat "docker rm -f order-service || exit /b 0"
                 bat "docker run -d --name user-service -p 3001:3001 %DOCKERHUB_REPO%/user-service:%IMAGE_TAG%"
                 bat "docker run -d --name order-service -p 3002:3002 %DOCKERHUB_REPO%/order-service:%IMAGE_TAG%"
             }
